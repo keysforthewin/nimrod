@@ -50,6 +50,7 @@ ws.on('open', () => {
 
     // 5) Whenever ffmpeg outputs a chunk of audio, send it to the WebSocket
     ffmpeg.stdout.on('data', (chunk) => {
+        console.log(`[${new Date().toISOString()}] sending chunk of size: ${chunk.length}`);
         ws.send(chunk);
     });
 
@@ -61,7 +62,7 @@ ws.on('open', () => {
     // 7) When ffmpeg is done, optionally close the WS connection
     ffmpeg.on('close', (code) => {
         console.log(`ffmpeg process exited with code ${code}`);
-        console.log('All audio data sent. Waiting for final transcripts...');
+        console.log(`[${new Date().toISOString()}] All audio data sent. Waiting for final transcripts...`);
         // Optionally, close the websocket if you're done sending audio
         // ws.close();
     });
@@ -73,7 +74,7 @@ ws.on('message', (data) => {
         // Expect JSON of the form { transcript, isPartial }
         const { transcript, isPartial } = JSON.parse(data);
         if (transcript) {
-            console.log(`Transcript: ${transcript} (partial: ${isPartial})`);
+            console.log(`[${new Date().toISOString()}] ${transcript} (partial: ${isPartial})`);
         }
     } catch (err) {
         console.error('Error parsing server message:', err);

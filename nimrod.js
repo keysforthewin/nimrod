@@ -7,6 +7,14 @@ const {
 } = require('@aws-sdk/client-transcribe-streaming');
 const {TranslateClient, TranslateTextCommand } = require("@aws-sdk/client-translate");
 
+// delete outputPath at the start of the script
+const fs = require('fs');
+const path = require('path');
+const outputPath = path.join(__dirname, 'session.wav');
+if (fs.existsSync(outputPath)) {
+    fs.unlinkSync(outputPath);
+}
+
 // ---------------------------------------------------------------------
 // 1) Configure AWS Transcribe client
 // ---------------------------------------------------------------------
@@ -38,7 +46,7 @@ const sockserver = new WebSocketServer({ port: 8550 }, () => {
 // 3) Handle connections
 // ---------------------------------------------------------------------
 sockserver.on('connection', async (ws) => {
-    console.log('New client connected');
+    console.log(`[${new Date().toISOString()}]  New client connected`);
 
     // Queue to store "fixed-size" audio chunks for AWS.
     const audioBufferQueue = [];
@@ -73,36 +81,43 @@ sockserver.on('connection', async (ws) => {
     // ---------------------------------------------------------------------
     async function* getAudioStream() {
         while (!isClosed) {
-            if (audioBufferQueue.length === 0) {
-                // No real audio to send right now
-                if (consecutiveSilenceChunksSent < maxSilenceChunks) {
-                    // Send a chunk of silence
-                    yield {
-                        AudioEvent: { AudioChunk: silenceChunk },
-                    };
-                    consecutiveSilenceChunksSent++;
-                    // small wait so we don't busy-loop
-                    await new Promise((resolve) => setTimeout(resolve, 10));
-                    continue;
-                } else {
-                    // We already sent enough silence. We could keep sending more
-                    // if you want to keep the stream alive longer.
-                    // If you prefer to finalize the stream, simply keep yielding or break.
-                    // For demonstration, let’s just keep sending periodic silence
-                    // in small amounts. (But you could break and let AWS finalize).
-                    yield {
-                        AudioEvent: { AudioChunk: silenceChunk },
-                    };
-                    await new Promise((resolve) => setTimeout(resolve, 100));
-                    continue;
-                }
-            }
+            // if (audioBufferQueue.length === 0) {
+            //     // No real audio to send right now
+            //     if (consecutiveSilenceChunksSent < maxSilenceChunks) {
+            //         // Send a chunk of silence
+            //         yield {
+            //             AudioEvent: { AudioChunk: silenceChunk },
+            //         };
+            //         consecutiveSilenceChunksSent++;
+            //         console.log("SENDING SILENCE WTF");
+            //         // small wait so we don't busy-loop
+            //         await new Promise((resolve) => setTimeout(resolve, 10));
+            //         continue;
+            //     } else {
+            //         // We already sent enough silence. We could keep sending more
+            //         // if you want to keep the stream alive longer.
+            //         // If you prefer to finalize the stream, simply keep yielding or break.
+            //         // For demonstration, let’s just keep sending periodic silence
+            //         // in small amounts. (But you could break and let AWS finalize).
+            //         yield {
+            //             AudioEvent: { AudioChunk: silenceChunk },
+            //         };
+            //         console.log("SENDING LONG SILENCE WTF");
+            //         await new Promise((resolve) => setTimeout(resolve, 100));
+            //         continue;
+            //     }
+            // }
 
             // We have real audio in the queue: send one chunk from the queue
             const audioChunk = audioBufferQueue.shift();
             if (audioChunk) {
                 // log that we’re sending
-                console.log('Sending audio chunk of length:', audioChunk.length);
+
+                // append this to session.wav so we can hear what we sent
+
+                fs.appendFileSync(outputPath, audioChunk);
+
+                console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
                 yield {
                     AudioEvent: {
                         AudioChunk: audioChunk,
@@ -111,6 +126,7 @@ sockserver.on('connection', async (ws) => {
                 // reset silence count since we just sent real audio
                 consecutiveSilenceChunksSent = 0;
             }
+            await new Promise((resolve) => setTimeout(resolve, 1));
         }
     }
 
@@ -128,23 +144,21 @@ sockserver.on('connection', async (ws) => {
     // 6) Send the command to Transcribe and handle transcription events
     // ---------------------------------------------------------------------
     const transcribeResponse = client.send(command);
-    console.log('Sent command to Transcribe');
+    console.log(`[${new Date().toISOString()}]  Sent command to Transcribe`);
 
     // Kick off an async operation to read the transcription results
     (async () => {
         try {
             const response = await transcribeResponse;
-            console.log('Got response from Transcribe', response);
             for await (const event of response.TranscriptResultStream) {
                 if (event.TranscriptEvent) {
                     const results = event.TranscriptEvent.Transcript.Results || [];
                     for (const result of results) {
-                        console.log('Got result', result);
 
                         // Each 'result' can have multiple 'Alternatives'
                         if (result.Alternatives && result.Alternatives.length > 0) {
                             const transcript = result.Alternatives[0].Transcript;
-
+                            console.log(`[${new Date().toISOString()}] Transcript: ${transcript} (partial: ${result.IsPartial})`);
                             // Send partial or final transcript back to the client
                             // 'result.IsPartial' indicates partial vs final
                             ws.send(JSON.stringify({
@@ -196,19 +210,25 @@ sockserver.on('connection', async (ws) => {
         // If the client sends text, handle that if needed
         // We assume raw binary audio frames
         if (Buffer.isBuffer(data)) {
-            console.log('Received binary data of length:', data.length);
+            //console.log('Received binary data of length:', data.length);
 
             // 1) Append inbound data to tempBuffer
             tempBuffer = Buffer.concat([tempBuffer, data]);
+            //console.log("tempbufferlen: ", tempBuffer.length);
 
             // 2) While we have enough data in tempBuffer to form a full chunk:
             while (tempBuffer.length >= chunkSize) {
                 // Slice out chunkSize bytes
                 const fullChunk = tempBuffer.slice(0, chunkSize);
+                // convert from source format to target format
+
                 // Push that into our queue
                 audioBufferQueue.push(fullChunk);
                 // Remove those bytes from tempBuffer
                 tempBuffer = tempBuffer.slice(chunkSize);
+                // log length
+                //console.log('Pushed audio chunk of length:', fullChunk.length);
+                //console.log('Remaining tempBuffer length:', tempBuffer.length);
             }
         } else {
             console.log('Received non-binary data (ignored)');
