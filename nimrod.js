@@ -11,91 +11,82 @@ const region = process.env.AWS_REGION;
 const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 
+const chunkDurationMs = parseInt(process.env.CHUNK_DURATION_MS, 10) || 20;
+const audioSampleRate = parseInt(process.env.SAMPLE_RATE, 10) || 16000;
+
 const sockserver = new WebSocketServer({ port: 8550 }, () => {
     console.log('WebSocket server is listening on port 8550');
 });
 
-// Queue to store "fixed-size" audio chunks for AWS.
-const audioBufferQueue = [];
+class AudioStream {
+    constructor(chunkDurationMs, audioSampleRate) {
+        this.chunkSize = Math.floor((chunkDurationMs / 1000) * audioSampleRate * 2);
+        console.log('Using chunkSize (bytes):', this.chunkSize);
 
-// Temp buffer accumulates partial data until we have a "full" chunk.
-let tempBuffer = Buffer.alloc(0);
+        this.chunkDurationMs = chunkDurationMs;
+        this.silenceChunk = Buffer.alloc(this.chunkSize, 0);
+        this.maxSilenceChunks = 10;
+        this.consecutiveSilenceChunksSent = 0;
+        this.dataSent = false;
+        this.silenceStartTime = 0;
+        this.isClosed = false;
+        this.audioBufferQueue = [];
+    }
 
-// Suppose you want a 20ms chunk size (for example).
-// chunkDurationMs can come from .env or be hardcoded.
-const chunkDurationMs = parseInt(process.env.CHUNK_DURATION_MS, 10) || 20;
-
-// We'll need sample rate as a number.
-const audioSampleRate = parseInt(process.env.SAMPLE_RATE, 10) || 16000;
-
-// Computed chunk size in bytes: chunkDurationMs / 1000 * sampleRate * 2
-const chunkSize = Math.floor((chunkDurationMs / 1000) * audioSampleRate * 2);
-console.log('Using chunkSize (bytes):', chunkSize);
-
-// Pre-create a silence chunk of the same size.
-const silenceChunk = Buffer.alloc(chunkSize, 0);
-
-// We'll send silence if we run out of real audio. How many consecutive
-// silence chunks do we want to send before deciding it's truly over?
-// (You can adjust this to control how quickly AWS decides to finalize).
-const maxSilenceChunks = 10;
-let consecutiveSilenceChunksSent = 0;
-let dataSent = false;
-let silenceStartTime = 0;
-async function* getAudioStream() {
-    while (!isClosed) {
-        if (audioBufferQueue.length === 0) {
-            if (dataSent) {
-                if (silenceStartTime === 0) {
-                    silenceStartTime = Date.now();
-                } else {
-                    if (Date.now() - silenceStartTime > 500) {
-                        if (consecutiveSilenceChunksSent < maxSilenceChunks) {
-                            // Send a chunk of silence
-                            yield {
-                                AudioEvent: {AudioChunk: silenceChunk},
-                            };
-                            consecutiveSilenceChunksSent++;
-                            console.log("SENDING SILENCE");
-                            await new Promise((resolve) => setTimeout(resolve, chunkDurationMs));
-                            continue;
-                        } else {
-                            dataSent = false;
+    async * getAudioStream() {
+        while (!this.isClosed) {
+            if (this.audioBufferQueue.length === 0) {
+                if (this.dataSent) {
+                    if (this.silenceStartTime === 0) {
+                        this.silenceStartTime = Date.now();
+                    } else {
+                        if (Date.now() - this.silenceStartTime > 500) {
+                            if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
+                                // Send a chunk of silence
+                                yield {
+                                    AudioEvent: {AudioChunk: this.silenceChunk},
+                                };
+                                this.consecutiveSilenceChunksSent++;
+                                console.log("SENDING SILENCE");
+                                await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
+                                continue;
+                            } else {
+                                this.dataSent = false;
+                            }
                         }
                     }
                 }
+
+                await new Promise((resolve) => setTimeout(resolve, 1));
             }
 
+            // We have real audio in the queue: send one chunk from the queue
+            const audioChunk = this.audioBufferQueue.shift();
+            if (audioChunk) {
+                console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
+                yield {
+                    AudioEvent: {
+                        AudioChunk: audioChunk,
+                    },
+                };
+                // reset silence count since we just sent real audio
+                this.dataSent = true;
+                this.silenceStartTime = 0;
+                this.consecutiveSilenceChunksSent = 0;
+            }
             await new Promise((resolve) => setTimeout(resolve, 1));
         }
-
-        // We have real audio in the queue: send one chunk from the queue
-        const audioChunk = audioBufferQueue.shift();
-        if (audioChunk) {
-            console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
-            yield {
-                AudioEvent: {
-                    AudioChunk: audioChunk,
-                },
-            };
-            // reset silence count since we just sent real audio
-            dataSent = true;
-            silenceStartTime = 0;
-            consecutiveSilenceChunksSent = 0;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        console.log("AUDIO STREAM CLOSED, WHAT NOW!");
     }
-    console.log("AUDIO STREAN CLOSED, WHAT NOW!");
 }
 
-let isClosed = false; // to signal when the client disconnects
+async function startTranscription(ws, audioStream) {
 
-async function startTranscription(ws) {
     const command = new StartStreamTranscriptionCommand({
         LanguageCode: process.env.SOURCE_LANGUAGE_CODE_LOCALE, // or your desired language
         MediaEncoding: 'pcm',  // must match what the client sends
         MediaSampleRateHertz: audioSampleRate, // must match your sample rate
-        AudioStream: getAudioStream(),
+        AudioStream: audioStream.getAudioStream(),
     });
 
     console.log(`[${new Date().toISOString()}]  Starting transcription stream`);
@@ -181,48 +172,35 @@ async function startTranscription(ws) {
 
 sockserver.on('connection', async (ws) => {
     console.log(`[${new Date().toISOString()}]  New client connected`);
+
+    let tempBuffer = Buffer.alloc(0);
+
+    const audioStream = new AudioStream(chunkDurationMs, audioSampleRate);
+
     ws.on('message', (data) => {
-        // If the client sends text, handle that if needed
-        // We assume raw binary audio frames
         if (Buffer.isBuffer(data)) {
-            //console.log('Received binary data of length:', data.length);
-
-            // 1) Append inbound data to tempBuffer
             tempBuffer = Buffer.concat([tempBuffer, data]);
-            //console.log("tempbufferlen: ", tempBuffer.length);
 
-            // 2) While we have enough data in tempBuffer to form a full chunk:
-            while (tempBuffer.length >= chunkSize) {
-                // Slice out chunkSize bytes
-                const fullChunk = tempBuffer.slice(0, chunkSize);
-                // convert from source format to target format
-
-                // Push that into our queue
-                audioBufferQueue.push(fullChunk);
-                // Remove those bytes from tempBuffer
-                tempBuffer = tempBuffer.slice(chunkSize);
-                // log length
-                //console.log('Pushed audio chunk of length:', fullChunk.length);
-                //console.log('Remaining tempBuffer length:', tempBuffer.length);
+            while (tempBuffer.length >= audioStream.chunkSize) {
+                const fullChunk = tempBuffer.slice(0, audioStream.chunkSize);
+                audioStream.audioBufferQueue.push(fullChunk);
+                tempBuffer = tempBuffer.slice(audioStream.chunkSize);
             }
         } else {
             console.log('Received non-binary data (ignored)');
         }
     });
 
-    // ---------------------------------------------------------------------
-    // 8) Clean up when client disconnects
-    // ---------------------------------------------------------------------
     ws.on('close', () => {
         console.log('Client disconnected');
-        isClosed = true;
+        audioStream.isClosed = true;
     });
 
     ws.on('error', (err) => {
         console.error('WebSocket error:', err);
-        isClosed = true;
+        audioStream.isClosed = true;
         ws.close();
     });
 
-    await startTranscription(ws);
+    await startTranscription(ws, audioStream);
 });
