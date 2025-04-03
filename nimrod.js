@@ -7,33 +7,9 @@ const {
 } = require('@aws-sdk/client-transcribe-streaming');
 const {TranslateClient, TranslateTextCommand } = require("@aws-sdk/client-translate");
 
-// delete outputPath at the start of the script
-const fs = require('fs');
-const path = require('path');
-const outputPath = path.join(__dirname, 'session.wav');
-if (fs.existsSync(outputPath)) {
-    fs.unlinkSync(outputPath);
-}
-
-// ---------------------------------------------------------------------
-// 1) Configure AWS Transcribe client
-// ---------------------------------------------------------------------
 const region = process.env.AWS_REGION;
 const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-
-const translationClient = new TranslateClient({ region: region, credentials: {
-        accessKeyId,
-        secretAccessKey,
-    }});
-
-const client = new TranscribeStreamingClient({
-    region,
-    credentials: {
-        accessKeyId,
-        secretAccessKey,
-    },
-});
 
 const sockserver = new WebSocketServer({ port: 8550 }, () => {
     console.log('WebSocket server is listening on port 8550');
@@ -80,7 +56,7 @@ async function* getAudioStream() {
                                 AudioEvent: {AudioChunk: silenceChunk},
                             };
                             consecutiveSilenceChunksSent++;
-                            console.log("SENDING SILENCE WTF");
+                            console.log("SENDING SILENCE");
                             await new Promise((resolve) => setTimeout(resolve, chunkDurationMs));
                             continue;
                         } else {
@@ -126,6 +102,19 @@ async function startTranscription(ws) {
     console.log(`[${new Date().toISOString()}]  Starting transcription stream`);
 
     try {
+        const translationClient = new TranslateClient({ region: region, credentials: {
+                accessKeyId,
+                secretAccessKey,
+            }});
+
+        const client = new TranscribeStreamingClient({
+            region,
+            credentials: {
+                accessKeyId,
+                secretAccessKey,
+            },
+        });
+
         const transcribeResponse = client.send(command);
         console.log(`[${new Date().toISOString()}]  Sent command to Transcribe`);
         const response = await transcribeResponse;
