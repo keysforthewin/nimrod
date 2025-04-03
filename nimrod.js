@@ -72,8 +72,6 @@ async function* getAudioStream() {
         // We have real audio in the queue: send one chunk from the queue
         const audioChunk = audioBufferQueue.shift();
         if (audioChunk) {
-            // append this to session.wav so we can hear what we sent
-            fs.appendFileSync(outputPath, audioChunk);
             console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
             yield {
                 AudioEvent: {
