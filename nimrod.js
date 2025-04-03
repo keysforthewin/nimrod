@@ -85,6 +85,7 @@ async function* getAudioStream() {
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
     }
+    console.log("AUDIO STREAN CLOSED, WHAT NOW!");
 }
 
 let isClosed = false; // to signal when the client disconnects
