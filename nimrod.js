@@ -25,7 +25,7 @@ class AudioStream {
 
         this.chunkDurationMs = chunkDurationMs;
         this.silenceChunk = Buffer.alloc(this.chunkSize, 0);
-        this.maxSilenceChunks = 10;
+        this.maxSilenceChunks = 66;
         this.consecutiveSilenceChunksSent = 0;
         this.dataSent = false;
         this.silenceStartTime = 0;
