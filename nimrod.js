@@ -102,7 +102,6 @@ class AudioStream {
         this.silenceStartTime = 0;
         this.isClosed = false;
         this.audioBufferQueue = [];
-        this.isGeneratorActive = false;  // Track if a generator is currently active
         
         // Initialize WAV writer for this session
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -111,14 +110,15 @@ class AudioStream {
         console.log(`Created audio log file: ${filename}`);
     }
 
+    resetForReconnection() {
+        // Reset state for reconnection
+        this.consecutiveSilenceChunksSent = 0;
+        this.dataSent = false;
+        this.silenceStartTime = 0;
+        console.log("Audio stream state reset for reconnection");
+    }
+
     async * getAudioStream() {
-        // Prevent multiple generators from running
-        if (this.isGeneratorActive) {
-            console.log("WARNING: Generator already active, skipping duplicate generator creation");
-            return;
-        }
-        
-        this.isGeneratorActive = true;
         console.log("Audio stream generator started");
         
         try {
@@ -144,7 +144,9 @@ class AudioStream {
                                     await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
                                     continue;
                                 } else {
-                                    this.dataSent = false;
+                                    // Exceeded max silence chunks, exit the generator to trigger reconnection
+                                    console.log("Max silence reached, exiting generator to trigger reconnection");
+                                    return;
                                 }
                             }
                         }
@@ -174,16 +176,12 @@ class AudioStream {
                 await new Promise((resolve) => setTimeout(resolve, 1));
             }
         } finally {
-            // Only close WAV file if this is the active generator
-            if (this.isGeneratorActive) {
-                console.log("AUDIO STREAM CLOSED, WHAT NOW!");
-                
-                // Close the WAV file when stream closes
-                if (this.wavWriter) {
-                    this.wavWriter.close();
-                }
-                
-                this.isGeneratorActive = false;
+            console.log("AUDIO STREAM GENERATOR EXITED");
+            
+            // Only close the WAV file if the client has disconnected
+            if (this.isClosed && this.wavWriter) {
+                console.log("Client disconnected, closing WAV file");
+                this.wavWriter.close();
             }
         }
     }
@@ -269,15 +267,13 @@ async function startTranscription(ws, audioStream) {
     } finally {
         console.log('Transcription stream finished');
         setTimeout(() => {
-            if (ws.readyState === ws.OPEN && !audioStream.isClosed && !audioStream.isGeneratorActive) {
+            if (ws.readyState === ws.OPEN && !audioStream.isClosed) {
+                // Reset the audio stream state before reconnecting
+                audioStream.resetForReconnection();
                 console.log('Reconnecting transcription stream...');
                 startTranscription(ws, audioStream);
             } else {
-                if (audioStream.isGeneratorActive) {
-                    console.log('Audio stream generator is still active. Not reconnecting.');
-                } else {
-                    console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
-                }
+                console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
             }
         }, 1000); // Increased delay to 1 second to prevent rapid reconnection attempts
     }
