@@ -40,7 +40,7 @@ class AudioStream {
                     if (this.silenceStartTime === 0) {
                         this.silenceStartTime = Date.now();
                     } else {
-                        if (Date.now() - this.silenceStartTime > 500) {
+                        if (Date.now() - this.silenceStartTime > 1000) {
                             if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
                                 // Send a chunk of silence
                                 yield {
