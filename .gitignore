@@ -136,4 +136,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
->>>>>>> f34d9fb0031830d7ebfa5fbdb3e6836fe49cb23d
+
+# Audio logs directory
+audio_logs/
