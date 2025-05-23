@@ -251,11 +251,11 @@ async function startTranscription(ws, audioStream) {
     } finally {
         console.log('Transcription stream finished');
         setTimeout(() => {
-            if (ws.readyState === ws.OPEN) {
+            if (ws.readyState === ws.OPEN && !audioStream.isClosed) {
                 console.log('Reconnecting transcription stream...');
                 startTranscription(ws, audioStream);
             } else {
-                console.log('WebSocket is closed. Not reconnecting transcription stream.');
+                console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
             }
         }, 100);
     }
