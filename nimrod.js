@@ -102,6 +102,7 @@ class AudioStream {
         this.silenceStartTime = 0;
         this.isClosed = false;
         this.audioBufferQueue = [];
+        this.isGeneratorActive = false;  // Track if a generator is currently active
         
         // Initialize WAV writer for this session
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -111,62 +112,79 @@ class AudioStream {
     }
 
     async * getAudioStream() {
-        while (!this.isClosed) {
-            if (this.audioBufferQueue.length === 0) {
-                if (this.dataSent) {
-                    if (this.silenceStartTime === 0) {
-                        this.silenceStartTime = Date.now();
-                    } else {
-                        if (Date.now() - this.silenceStartTime > 1000) {
-                            if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
-                                // Send a chunk of silence
-                                const silenceChunk = this.silenceChunk;
-                                
-                                // Log the silence chunk to WAV file
-                                this.wavWriter.writeAudioChunk(silenceChunk);
-                                
-                                yield {
-                                    AudioEvent: {AudioChunk: silenceChunk},
-                                };
-                                this.consecutiveSilenceChunksSent++;
-                                console.log("SENDING SILENCE");
-                                await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
-                                continue;
-                            } else {
-                                this.dataSent = false;
+        // Prevent multiple generators from running
+        if (this.isGeneratorActive) {
+            console.log("WARNING: Generator already active, skipping duplicate generator creation");
+            return;
+        }
+        
+        this.isGeneratorActive = true;
+        console.log("Audio stream generator started");
+        
+        try {
+            while (!this.isClosed) {
+                if (this.audioBufferQueue.length === 0) {
+                    if (this.dataSent) {
+                        if (this.silenceStartTime === 0) {
+                            this.silenceStartTime = Date.now();
+                        } else {
+                            if (Date.now() - this.silenceStartTime > 1000) {
+                                if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
+                                    // Send a chunk of silence
+                                    const silenceChunk = this.silenceChunk;
+                                    
+                                    // Log the silence chunk to WAV file
+                                    this.wavWriter.writeAudioChunk(silenceChunk);
+                                    
+                                    yield {
+                                        AudioEvent: {AudioChunk: silenceChunk},
+                                    };
+                                    this.consecutiveSilenceChunksSent++;
+                                    console.log("SENDING SILENCE");
+                                    await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
+                                    continue;
+                                } else {
+                                    this.dataSent = false;
+                                }
                             }
                         }
                     }
+
+                    await new Promise((resolve) => setTimeout(resolve, 1));
                 }
 
+                // We have real audio in the queue: send one chunk from the queue
+                const audioChunk = this.audioBufferQueue.shift();
+                if (audioChunk) {
+                    console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
+                    
+                    // Log the audio chunk to WAV file
+                    this.wavWriter.writeAudioChunk(audioChunk);
+                    
+                    yield {
+                        AudioEvent: {
+                            AudioChunk: audioChunk,
+                        },
+                    };
+                    // reset silence count since we just sent real audio
+                    this.dataSent = true;
+                    this.silenceStartTime = 0;
+                    this.consecutiveSilenceChunksSent = 0;
+                }
                 await new Promise((resolve) => setTimeout(resolve, 1));
             }
-
-            // We have real audio in the queue: send one chunk from the queue
-            const audioChunk = this.audioBufferQueue.shift();
-            if (audioChunk) {
-                console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
+        } finally {
+            // Only close WAV file if this is the active generator
+            if (this.isGeneratorActive) {
+                console.log("AUDIO STREAM CLOSED, WHAT NOW!");
                 
-                // Log the audio chunk to WAV file
-                this.wavWriter.writeAudioChunk(audioChunk);
+                // Close the WAV file when stream closes
+                if (this.wavWriter) {
+                    this.wavWriter.close();
+                }
                 
-                yield {
-                    AudioEvent: {
-                        AudioChunk: audioChunk,
-                    },
-                };
-                // reset silence count since we just sent real audio
-                this.dataSent = true;
-                this.silenceStartTime = 0;
-                this.consecutiveSilenceChunksSent = 0;
+                this.isGeneratorActive = false;
             }
-            await new Promise((resolve) => setTimeout(resolve, 1));
-        }
-        console.log("AUDIO STREAM CLOSED, WHAT NOW!");
-        
-        // Close the WAV file when stream closes
-        if (this.wavWriter) {
-            this.wavWriter.close();
         }
     }
 }
@@ -251,13 +269,17 @@ async function startTranscription(ws, audioStream) {
     } finally {
         console.log('Transcription stream finished');
         setTimeout(() => {
-            if (ws.readyState === ws.OPEN && !audioStream.isClosed) {
+            if (ws.readyState === ws.OPEN && !audioStream.isClosed && !audioStream.isGeneratorActive) {
                 console.log('Reconnecting transcription stream...');
                 startTranscription(ws, audioStream);
             } else {
-                console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
+                if (audioStream.isGeneratorActive) {
+                    console.log('Audio stream generator is still active. Not reconnecting.');
+                } else {
+                    console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
+                }
             }
-        }, 100);
+        }, 1000); // Increased delay to 1 second to prevent rapid reconnection attempts
     }
 }
 
