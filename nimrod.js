@@ -128,7 +128,7 @@ class AudioStream {
                         if (this.silenceStartTime === 0) {
                             this.silenceStartTime = Date.now();
                         } else {
-                            if (Date.now() - this.silenceStartTime > 1000) {
+                            if (Date.now() - this.silenceStartTime > 500) {
                                 if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
                                     // Send a chunk of silence
                                     const silenceChunk = this.silenceChunk;
@@ -144,9 +144,7 @@ class AudioStream {
                                     await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
                                     continue;
                                 } else {
-                                    // Exceeded max silence chunks, exit the generator to trigger reconnection
-                                    console.log("Max silence reached, exiting generator to trigger reconnection");
-                                    return;
+                                    this.dataSent = false;
                                 }
                             }
                         }
@@ -267,7 +265,7 @@ async function startTranscription(ws, audioStream) {
     } finally {
         console.log('Transcription stream finished');
         setTimeout(() => {
-            if (ws.readyState === ws.OPEN && !audioStream.isClosed) {
+            if (ws.readyState === ws.OPEN) {
                 // Reset the audio stream state before reconnecting
                 audioStream.resetForReconnection();
                 console.log('Reconnecting transcription stream...');
@@ -275,7 +273,7 @@ async function startTranscription(ws, audioStream) {
             } else {
                 console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
             }
-        }, 1000); // Increased delay to 1 second to prevent rapid reconnection attempts
+        }, 10); // Increased delay to 1 second to prevent rapid reconnection attempts
     }
 }
 
