@@ -59,12 +59,16 @@ ws.on('open', () => {
         console.error('ffmpeg error:', data.toString());
     });
 
-    // 7) When ffmpeg is done, optionally close the WS connection
+    // 7) When ffmpeg is done, send END_OF_AUDIO signal to trigger finalization
     ffmpeg.on('close', (code) => {
         console.log(`ffmpeg process exited with code ${code}`);
-        console.log(`[${new Date().toISOString()}] All audio data sent. Waiting for final transcripts...`);
-        // Optionally, close the websocket if you're done sending audio
-        // ws.close();
+        console.log(`[${new Date().toISOString()}] All audio data sent. Sending END_OF_AUDIO signal...`);
+        
+        // Send END_OF_AUDIO text message to trigger Deepgram finalization
+        ws.send('END_OF_AUDIO');
+        console.log(`[${new Date().toISOString()}] END_OF_AUDIO sent. Waiting for final transcripts...`);
+        
+        // Note: Server will close the WebSocket after final transcript is received
     });
 });
 
