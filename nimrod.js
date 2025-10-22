@@ -157,6 +157,8 @@ class AudioStream {
                 const audioChunk = this.audioBufferQueue.shift();
                 if (audioChunk) {
                     console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
+                    console.log(`Queue size: ${this.audioBufferQueue.length}, chunk: ${audioChunk.length}`);
+
                     
                     // Log the audio chunk to WAV file
                     this.wavWriter.writeAudioChunk(audioChunk);
