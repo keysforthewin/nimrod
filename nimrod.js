@@ -115,6 +115,7 @@ class AudioStream {
         this.consecutiveSilenceChunksSent = 0;
         this.dataSent = false;
         this.silenceStartTime = 0;
+        this.audioBufferQueue = [];
         console.log("Audio stream state reset for reconnection");
     }
 
@@ -187,13 +188,13 @@ class AudioStream {
     }
 }
 
-async function startTranscription(ws, audioStream) {
+async function startTranscription(ws, audioStream, audioGenerator) {
 
     const command = new StartStreamTranscriptionCommand({
         LanguageCode: process.env.SOURCE_LANGUAGE_CODE_LOCALE, // or your desired language
         MediaEncoding: 'pcm',  // must match what the client sends
         MediaSampleRateHertz: audioSampleRate, // must match your sample rate
-        AudioStream: audioStream.getAudioStream(),
+        AudioStream: audioGenerator,
     });
 
     console.log(`[${new Date().toISOString()}]  Starting transcription stream`);
@@ -271,11 +272,11 @@ async function startTranscription(ws, audioStream) {
                 // Reset the audio stream state before reconnecting
                 audioStream.resetForReconnection();
                 console.log('Reconnecting transcription stream...');
-                startTranscription(ws, audioStream);
+                startTranscription(ws, audioStream, audioGenerator);
             } else {
                 console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
             }
-        }, 10); // Increased delay to 1 second to prevent rapid reconnection attempts
+        }, 100); // Increased delay to 100ms to prevent rapid reconnection
     }
 }
 
@@ -291,6 +292,9 @@ sockserver.on('connection', async (ws) => {
     let tempBuffer = Buffer.alloc(0);
 
     const audioStream = new AudioStream(chunkDurationMs, audioSampleRate, sessionId);
+    
+    // Create the audio generator once - it will be reused across AWS reconnections
+    const audioGenerator = audioStream.getAudioStream();
 
     ws.on('message', (data) => {
         if (Buffer.isBuffer(data)) {
@@ -317,5 +321,5 @@ sockserver.on('connection', async (ws) => {
         ws.close();
     });
 
-    await startTranscription(ws, audioStream);
+    await startTranscription(ws, audioStream, audioGenerator);
 });
