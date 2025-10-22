@@ -10,8 +10,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-transcribe-streaming": "^3.775.0",
     "@aws-sdk/client-translate": "^3.775.0",
-    "@deepgram/sdk": "^4.11.2",
     "dotenv": "^16.4.7",
     "ws": "^8.18.1"
   }
