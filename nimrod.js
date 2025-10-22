@@ -1,19 +1,16 @@
 // server.js
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
-const {
-    TranscribeStreamingClient,
-    StartStreamTranscriptionCommand
-} = require('@aws-sdk/client-transcribe-streaming');
-const {TranslateClient, TranslateTextCommand } = require("@aws-sdk/client-translate");
+const { createClient } = require('@deepgram/sdk');
+const { TranslateClient, TranslateTextCommand } = require("@aws-sdk/client-translate");
 const fs = require('fs');
 const path = require('path');
 
 const region = process.env.AWS_REGION;
 const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
 
-const chunkDurationMs = parseInt(process.env.CHUNK_DURATION_MS, 10) || 20;
 const audioSampleRate = parseInt(process.env.SAMPLE_RATE, 10) || 16000;
 
 // Ensure audio logs directory exists
@@ -89,237 +86,156 @@ class WavWriter {
     }
 }
 
-class AudioStream {
-    constructor(chunkDurationMs, audioSampleRate, sessionId) {
-        this.chunkSize = Math.floor((chunkDurationMs / 1000) * audioSampleRate * 2);
-        console.log('Using chunkSize (bytes):', this.chunkSize);
-
-        this.chunkDurationMs = chunkDurationMs;
-        this.silenceChunk = Buffer.alloc(this.chunkSize, 0);
-        this.maxSilenceChunks = 15;
-        this.consecutiveSilenceChunksSent = 0;
-        this.dataSent = false;
-        this.silenceStartTime = 0;
-        this.isClosed = false;
-        this.audioBufferQueue = [];
-        
-        // Initialize WAV writer for this session
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = path.join(audioLogsDir, `audio_session_${timestamp}_${sessionId}.wav`);
-        this.wavWriter = new WavWriter(filename, audioSampleRate);
-        console.log(`Created audio log file: ${filename}`);
-    }
-
-    resetForReconnection() {
-        // Reset state for reconnection
-        this.consecutiveSilenceChunksSent = 0;
-        this.dataSent = false;
-        this.silenceStartTime = 0;
-        this.audioBufferQueue = [];
-        console.log("Audio stream state reset for reconnection");
-    }
-
-    async * getAudioStream() {
-        console.log("Audio stream generator started");
-        
-        try {
-            while (!this.isClosed) {
-                if (this.audioBufferQueue.length === 0) {
-                    if (this.dataSent) {
-                        if (this.silenceStartTime === 0) {
-                            this.silenceStartTime = Date.now();
-                        } else {
-                            if (Date.now() - this.silenceStartTime > 500) {
-                                if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
-                                    // Send a chunk of silence
-                                    const silenceChunk = this.silenceChunk;
-                                    
-                                    // Log the silence chunk to WAV file
-                                    this.wavWriter.writeAudioChunk(silenceChunk);
-                                    
-                                    yield {
-                                        AudioEvent: {AudioChunk: silenceChunk},
-                                    };
-                                    this.consecutiveSilenceChunksSent++;
-                                    console.log("SENDING SILENCE");
-                                    await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
-                                    continue;
-                                } else {
-                                    this.dataSent = false;
-                                }
-                            }
-                        }
-                    }
-
-                    await new Promise((resolve) => setTimeout(resolve, 1));
-                }
-
-                // We have real audio in the queue: send one chunk from the queue
-                const audioChunk = this.audioBufferQueue.shift();
-                if (audioChunk) {
-                    console.log(`[${new Date().toISOString()}]  audio chunk of length: ${audioChunk.length}`);
-                    console.log(`Queue size: ${this.audioBufferQueue.length}, chunk: ${audioChunk.length}`);
-
-                    
-                    // Log the audio chunk to WAV file
-                    this.wavWriter.writeAudioChunk(audioChunk);
-                    
-                    yield {
-                        AudioEvent: {
-                            AudioChunk: audioChunk,
-                        },
-                    };
-                    // reset silence count since we just sent real audio
-                    this.dataSent = true;
-                    this.silenceStartTime = 0;
-                    this.consecutiveSilenceChunksSent = 0;
-                }
-                await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
-            }
-        } finally {
-            console.log("AUDIO STREAM GENERATOR EXITED");
-            
-            // Only close the WAV file if the client has disconnected
-            if (this.isClosed && this.wavWriter) {
-                console.log("Client disconnected, closing WAV file");
-                this.wavWriter.close();
-            }
-        }
-    }
-}
-
-async function startTranscription(ws, audioStream, audioGenerator) {
-
-    const command = new StartStreamTranscriptionCommand({
-        LanguageCode: process.env.SOURCE_LANGUAGE_CODE_LOCALE, // or your desired language
-        MediaEncoding: 'pcm',  // must match what the client sends
-        MediaSampleRateHertz: audioSampleRate, // must match your sample rate
-        AudioStream: audioGenerator,
-    });
-
-    console.log(`[${new Date().toISOString()}]  Starting transcription stream`);
-
-    try {
-        const translationClient = new TranslateClient({ region: region, credentials: {
-                accessKeyId,
-                secretAccessKey,
-            }});
-
-        const client = new TranscribeStreamingClient({
-            region,
-            credentials: {
-                accessKeyId,
-                secretAccessKey,
-            },
-        });
-
-        const transcribeResponse = client.send(command);
-        console.log(`[${new Date().toISOString()}]  Sent command to Transcribe`);
-        const response = await transcribeResponse;
-
-        for await (const event of response.TranscriptResultStream) {
-            if (event.TranscriptEvent) {
-                const results = event.TranscriptEvent.Transcript.Results || [];
-                for (const result of results) {
-
-                    // Each 'result' can have multiple 'Alternatives'
-                    if (result.Alternatives && result.Alternatives.length > 0) {
-                        const transcript = result.Alternatives[0].Transcript;
-                        console.log(`[${new Date().toISOString()}] Transcript: ${transcript} (partial: ${result.IsPartial})`);
-                        // Send partial or final transcript back to the client
-                        // 'result.IsPartial' indicates partial vs final
-                        ws.send(JSON.stringify({
-                            isPartial: result.IsPartial,
-                            transcript,
-                        }));
-
-                        if (process.env.SOURCE_LANGUAGE_CODE !== process.env.TARGET_LANGUAGE_CODE) {
-                            if (process.env.TARGET_LANGUAGE_CODE !== '') {
-                                // get translation from AWS and ws.send it
-                                try {
-                                    const command = new TranslateTextCommand({
-                                        SourceLanguageCode: process.env.SOURCE_LANGUAGE_CODE,
-                                        TargetLanguageCode: process.env.TARGET_LANGUAGE_CODE,
-                                        Text: transcript,
-                                    });
-                                    const data = await translationClient.send(command);
-                                    console.log('Translation:', data);
-                                    ws.send(JSON.stringify({
-                                        isPartial: result.IsPartial,
-                                        translated: true,
-                                        transcript: data.TranslatedText
-                                    }));
-                                    // process data.
-                                } catch (error) {
-                                    console.log(error)
-                                    // error handling.
-                                } finally {
-                                    // finally.
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } catch (err) {
-        console.error('Error in transcription stream:', err);
-        // Reconnect after a delay if the WebSocket is still open.
-    } finally {
-        console.log('Transcription stream finished');
-        setTimeout(() => {
-            if (ws.readyState === ws.OPEN) {
-                // Reset the audio stream state before reconnecting
-                audioStream.resetForReconnection();
-                console.log('Reconnecting transcription stream...');
-                startTranscription(ws, audioStream, audioGenerator);
-            } else {
-                console.log('WebSocket is closed or audio stream is closed. Not reconnecting transcription stream.');
-            }
-        }, 100); // Increased delay to 100ms to prevent rapid reconnection
-    }
-}
-
 // Generate session ID
 function generateSessionId() {
     return Math.random().toString(36).substring(2, 8);
 }
 
+async function handleTranscription(ws, sessionId, wavWriter) {
+    const deepgram = createClient(deepgramApiKey);
+    
+    // Initialize translation client if needed
+    let translationClient = null;
+    const needsTranslation = process.env.SOURCE_LANGUAGE_CODE !== process.env.TARGET_LANGUAGE_CODE 
+                          && process.env.TARGET_LANGUAGE_CODE !== '';
+    
+    if (needsTranslation) {
+        translationClient = new TranslateClient({ 
+            region: region, 
+            credentials: {
+                accessKeyId,
+                secretAccessKey,
+            }
+        });
+    }
+
+    // Create Deepgram live transcription connection
+    const dgConnection = deepgram.listen.live({
+        encoding: 'linear16',
+        sample_rate: audioSampleRate,
+        channels: 1,
+        language: process.env.SOURCE_LANGUAGE_CODE_LOCALE || 'en-US',
+        interim_results: true,
+        punctuate: true,
+        smart_format: true,
+    });
+
+    // Handle Deepgram connection open
+    dgConnection.on('open', () => {
+        console.log(`[${new Date().toISOString()}] Deepgram connection opened (session: ${sessionId})`);
+    });
+
+    // Handle Deepgram transcripts
+    dgConnection.on('Results', async (data) => {
+        const transcript = data.channel.alternatives[0].transcript;
+        
+        if (transcript && transcript.length > 0) {
+            const isPartial = data.is_final === false;
+            
+            console.log(`[${new Date().toISOString()}] Transcript: ${transcript} (partial: ${isPartial})`);
+            
+            // Send original transcript
+            ws.send(JSON.stringify({
+                isPartial: isPartial,
+                transcript: transcript,
+            }));
+
+            // Send translation if needed
+            if (needsTranslation && translationClient) {
+                try {
+                    const command = new TranslateTextCommand({
+                        SourceLanguageCode: process.env.SOURCE_LANGUAGE_CODE,
+                        TargetLanguageCode: process.env.TARGET_LANGUAGE_CODE,
+                        Text: transcript,
+                    });
+                    const translationData = await translationClient.send(command);
+                    console.log('Translation:', translationData);
+                    ws.send(JSON.stringify({
+                        isPartial: isPartial,
+                        translated: true,
+                        transcript: translationData.TranslatedText
+                    }));
+                } catch (error) {
+                    console.error('Translation error:', error);
+                }
+            }
+        }
+    });
+
+    // Handle Deepgram errors
+    dgConnection.on('error', (error) => {
+        console.error(`[${new Date().toISOString()}] Deepgram error (session: ${sessionId}):`, error);
+    });
+
+    // Handle Deepgram connection close
+    dgConnection.on('close', () => {
+        console.log(`[${new Date().toISOString()}] Deepgram connection closed (session: ${sessionId})`);
+    });
+
+    // Handle Deepgram metadata
+    dgConnection.on('Metadata', (data) => {
+        console.log(`[${new Date().toISOString()}] Deepgram metadata:`, data);
+    });
+
+    return dgConnection;
+}
+
 sockserver.on('connection', async (ws) => {
     const sessionId = generateSessionId();
-    console.log(`[${new Date().toISOString()}]  New client connected (session: ${sessionId})`);
+    console.log(`[${new Date().toISOString()}] New client connected (session: ${sessionId})`);
 
-    let tempBuffer = Buffer.alloc(0);
+    // Initialize WAV writer for this session
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = path.join(audioLogsDir, `audio_session_${timestamp}_${sessionId}.wav`);
+    const wavWriter = new WavWriter(filename, audioSampleRate);
+    console.log(`Created audio log file: ${filename}`);
 
-    const audioStream = new AudioStream(chunkDurationMs, audioSampleRate, sessionId);
-    
-    // Create the audio generator once - it will be reused across AWS reconnections
-    const audioGenerator = audioStream.getAudioStream();
+    // Create Deepgram connection
+    let dgConnection = null;
+    try {
+        dgConnection = await handleTranscription(ws, sessionId, wavWriter);
+    } catch (error) {
+        console.error('Failed to create Deepgram connection:', error);
+        ws.close();
+        return;
+    }
 
+    // Handle incoming audio from client
     ws.on('message', (data) => {
         if (Buffer.isBuffer(data)) {
-            tempBuffer = Buffer.concat([tempBuffer, data]);
-
-            while (tempBuffer.length >= audioStream.chunkSize) {
-                const fullChunk = tempBuffer.slice(0, audioStream.chunkSize);
-                audioStream.audioBufferQueue.push(fullChunk);
-                tempBuffer = tempBuffer.slice(audioStream.chunkSize);
+            // Log audio to WAV file
+            wavWriter.writeAudioChunk(data);
+            
+            // Forward audio to Deepgram
+            if (dgConnection && dgConnection.getReadyState() === 1) {
+                dgConnection.send(data);
             }
         } else {
             console.log('Received non-binary data (ignored)');
         }
     });
 
+    // Handle client disconnect
     ws.on('close', () => {
-        console.log(`Client disconnected (session: ${sessionId})`);
-        audioStream.isClosed = true;
+        console.log(`[${new Date().toISOString()}] Client disconnected (session: ${sessionId})`);
+        
+        // Close Deepgram connection
+        if (dgConnection) {
+            dgConnection.finish();
+        }
+        
+        // Close WAV file
+        if (wavWriter) {
+            wavWriter.close();
+        }
     });
 
+    // Handle WebSocket errors
     ws.on('error', (err) => {
         console.error('WebSocket error:', err);
-        audioStream.isClosed = true;
+        if (dgConnection) {
+            dgConnection.finish();
+        }
         ws.close();
     });
-
-    await startTranscription(ws, audioStream, audioGenerator);
 });
