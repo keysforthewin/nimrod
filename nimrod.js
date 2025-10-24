@@ -175,7 +175,8 @@ class AudioStream {
                         };
                     }
                 }
-                await new Promise((resolve) => setTimeout(resolve, this.chunkDurationMs));
+                // Send chunks as fast as possible - no artificial delay
+                await new Promise((resolve) => setTimeout(resolve, 1));
             }
         } finally {
             console.log("AUDIO STREAM GENERATOR EXITED");
@@ -227,6 +228,17 @@ async function startTranscription(ws, audioStream, audioGenerator, connectionSta
             console.log(`[${new Date().toISOString()}] ✓ Deepgram connection OPENED successfully`);
             console.log(`[${new Date().toISOString()}] Ready state: ${deepgramConnection.getReadyState()}`);
 
+            // Flush any pending audio chunks that were buffered while waiting for connection
+            if (connectionState.pendingAudioChunks.length > 0) {
+                console.log(`[${new Date().toISOString()}] Flushing ${connectionState.pendingAudioChunks.length} pending audio chunks`);
+                for (const chunk of connectionState.pendingAudioChunks) {
+                    deepgramConnection.send(chunk);
+                    deepgramChunksSent++;
+                }
+                console.log(`[${new Date().toISOString()}] ✓ Flushed all pending chunks. Total sent: ${deepgramChunksSent}`);
+                connectionState.pendingAudioChunks = [];
+            }
+
             // Start keep-alive interval (send every 5 seconds to prevent auto-close after 10s of silence)
             connectionState.keepAliveInterval = setInterval(() => {
                 if (connectionState.deepgramConnection && connectionState.deepgramConnection.getReadyState() === 1) {
@@ -245,14 +257,14 @@ async function startTranscription(ws, audioStream, audioGenerator, connectionSta
                             const audioChunk = audioEvent.AudioEvent.AudioChunk;
                             const readyState = deepgramConnection ? deepgramConnection.getReadyState() : -1;
                             
-                            console.log(`[${new Date().toISOString()}] Audio generator yielded chunk #${deepgramChunksSent + 1}, size: ${audioChunk.length} bytes, ready state: ${readyState}`);
-                            
                             if (deepgramConnection && readyState === 1) {
                                 deepgramConnection.send(audioChunk);
                                 deepgramChunksSent++;
-                                console.log(`[${new Date().toISOString()}] ✓ Sent chunk #${deepgramChunksSent} to Deepgram (${audioChunk.length} bytes)`);
+                                console.log(`[${new Date().toISOString()}] ✓ Sent chunk #${deepgramChunksSent} to Deepgram (${audioChunk.length} bytes, ready state: ${readyState})`);
                             } else {
-                                console.warn(`[${new Date().toISOString()}] ✗ SKIPPED chunk - Deepgram not ready! Ready state: ${readyState} (expected: 1)`);
+                                // Buffer the chunk instead of skipping it
+                                connectionState.pendingAudioChunks.push(audioChunk);
+                                console.log(`[${new Date().toISOString()}] ⏳ Buffered chunk (${audioChunk.length} bytes) - Deepgram not ready yet. Ready state: ${readyState}, Buffered: ${connectionState.pendingAudioChunks.length}`);
                             }
                         } else if (audioEvent && audioEvent.ControlEvent && audioEvent.ControlEvent.message === 'END_OF_AUDIO') {
                             console.log(`[${new Date().toISOString()}] ✓ END_OF_AUDIO control message received from queue - all audio chunks sent`);
@@ -331,21 +343,43 @@ async function startTranscription(ws, audioStream, audioGenerator, connectionSta
                     transcript: combinedTranscript,
                 }));
 
-                // If this is final, close connections immediately
+                // If this is final, close DeepGram but keep WebSocket open for next session
                 if (isSpeechFinal) {
-                    console.log(`[${new Date().toISOString()}] Final transcript received - closing connections`);
+                    console.log(`[${new Date().toISOString()}] Final transcript received - closing DeepGram session`);
+                    
+                    // Clear timers immediately - don't wait for Close event
+                    if (connectionState.keepAliveInterval) {
+                        clearInterval(connectionState.keepAliveInterval);
+                        connectionState.keepAliveInterval = null;
+                        console.log(`[${new Date().toISOString()}] Cleared keep-alive interval after final transcript`);
+                    }
+                    
+                    if (connectionState.finalizeTimeout) {
+                        clearTimeout(connectionState.finalizeTimeout);
+                        connectionState.finalizeTimeout = null;
+                        console.log(`[${new Date().toISOString()}] Cleared finalize timeout after final transcript`);
+                    }
+                    
+                    // Reset state flags for next session
+                    connectionState.completedTranscript = '';
+                    connectionState.waitingForFinalTranscript = false;
+                    connectionState.endOfAudioReceived = false;
+                    connectionState.deepgramConnected = false;
+                    console.log(`[${new Date().toISOString()}] Reset connection state for next session`);
                     
                     // Request close from Deepgram
                     if (connectionState.deepgramConnection) {
                         console.log(`[${new Date().toISOString()}] Sending CloseStream to Deepgram`);
                         connectionState.deepgramConnection.requestClose();
+                        connectionState.deepgramConnection = null;
                     }
                     
-                    // Close the client WebSocket
-                    if (ws.readyState === ws.OPEN) {
-                        console.log(`[${new Date().toISOString()}] Closing client WebSocket`);
-                        ws.close();
+                    // Initialize new session for next transcription
+                    if (connectionState.initializeNewSession) {
+                        connectionState.initializeNewSession();
                     }
+                    
+                    console.log(`[${new Date().toISOString()}] DeepGram session closed - WebSocket ready for new sessions`);
                 }
             } else {
                 console.log(`[${new Date().toISOString()}] Empty transcript received from Deepgram (is_final: ${isFinal})`);
@@ -452,8 +486,8 @@ async function startTranscription(ws, audioStream, audioGenerator, connectionSta
             }
         }
         
-        // No reconnection logic - single-use sessions only
-        console.log('Deepgram session completed - no reconnection');
+        // Session completed - client can start new sessions on same WebSocket
+        console.log('Deepgram session completed - ready for new sessions');
     }
 }
 
@@ -463,10 +497,14 @@ function generateSessionId() {
 }
 
 sockserver.on('connection', async (ws) => {
-    const sessionId = generateSessionId();
-    console.log(`[${new Date().toISOString()}]  New client connected (session: ${sessionId})`);
+    const clientId = generateSessionId();
+    console.log(`[${new Date().toISOString()}]  New client connected (client: ${clientId})`);
 
+    // Session-specific state that needs to be recreated for each DeepGram session
     let tempBuffer = Buffer.alloc(0);
+    let audioStream = null;
+    let audioGenerator = null;
+    let currentSessionId = null;
     
     // State variables for Deepgram connection lifecycle
     let deepgramConnection = null;
@@ -476,11 +514,31 @@ sockserver.on('connection', async (ws) => {
     let finalizeTimeout = null;
     let deepgramConnected = false;
     let completedTranscript = '';
-
-    const audioStream = new AudioStream(chunkDurationMs, audioSampleRate, sessionId);
     
-    // Create the audio generator once
-    const audioGenerator = audioStream.getAudioStream();
+    // Function to initialize a new session
+    function initializeNewSession() {
+        currentSessionId = generateSessionId();
+        console.log(`[${new Date().toISOString()}] Initializing new session: ${currentSessionId}`);
+        
+        // Close previous WAV file if it exists
+        if (audioStream && audioStream.wavWriter) {
+            audioStream.wavWriter.close();
+        }
+        
+        // Create new AudioStream for this session
+        audioStream = new AudioStream(chunkDurationMs, audioSampleRate, currentSessionId);
+        
+        // Create new audio generator for this session
+        audioGenerator = audioStream.getAudioStream();
+        
+        // Reset buffer
+        tempBuffer = Buffer.alloc(0);
+        
+        console.log(`[${new Date().toISOString()}] New session initialized: ${currentSessionId}`);
+    }
+    
+    // Initialize first session
+    initializeNewSession();
 
     ws.on('message', async (data) => {
         // Check if this is a text message (END_OF_AUDIO signal)
@@ -541,8 +599,16 @@ sockserver.on('connection', async (ws) => {
     });
 
     ws.on('close', () => {
-        console.log(`Client disconnected (session: ${sessionId})`);
-        audioStream.isClosed = true;
+        console.log(`Client disconnected (client: ${clientId})`);
+        
+        // Close AudioStream and WAV file
+        if (audioStream) {
+            audioStream.isClosed = true;
+            if (audioStream.wavWriter) {
+                console.log(`[${new Date().toISOString()}] Closing WAV file on client disconnect`);
+                audioStream.wavWriter.close();
+            }
+        }
         
         // Clean up intervals and timeouts when client disconnects
         if (connectionState.keepAliveInterval) {
@@ -555,11 +621,28 @@ sockserver.on('connection', async (ws) => {
             connectionState.finalizeTimeout = null;
             console.log(`[${new Date().toISOString()}] Cleared finalize timeout on client disconnect`);
         }
+        
+        // Close DeepGram connection if still open
+        if (connectionState.deepgramConnection) {
+            try {
+                connectionState.deepgramConnection.requestClose();
+            } catch (err) {
+                console.error(`[${new Date().toISOString()}] Error closing DeepGram on client disconnect:`, err);
+            }
+        }
     });
 
     ws.on('error', (err) => {
         console.error('WebSocket error:', err);
-        audioStream.isClosed = true;
+        
+        // Close AudioStream and WAV file
+        if (audioStream) {
+            audioStream.isClosed = true;
+            if (audioStream.wavWriter) {
+                console.log(`[${new Date().toISOString()}] Closing WAV file on WebSocket error`);
+                audioStream.wavWriter.close();
+            }
+        }
         
         // Clean up intervals and timeouts on WebSocket error
         if (connectionState.keepAliveInterval) {
@@ -573,6 +656,15 @@ sockserver.on('connection', async (ws) => {
             console.log(`[${new Date().toISOString()}] Cleared finalize timeout on WebSocket error`);
         }
         
+        // Close DeepGram connection if still open
+        if (connectionState.deepgramConnection) {
+            try {
+                connectionState.deepgramConnection.requestClose();
+            } catch (err) {
+                console.error(`[${new Date().toISOString()}] Error closing DeepGram on WebSocket error:`, err);
+            }
+        }
+        
         ws.close();
     });
 
@@ -584,7 +676,9 @@ sockserver.on('connection', async (ws) => {
         waitingForFinalTranscript,
         finalizeTimeout,
         deepgramConnected,
-        completedTranscript
+        completedTranscript,
+        pendingAudioChunks: [],  // Buffer for chunks received before Deepgram is ready
+        initializeNewSession  // Add session initialization function to state
     };
 
     // No longer start transcription immediately - wait for first audio data

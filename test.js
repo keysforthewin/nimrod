@@ -12,6 +12,7 @@
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const path = require('path');
+const readline = require('readline');
 
 // 1) Parse command-line argument for input file
 const inputFile = process.argv[2];
@@ -23,13 +24,16 @@ if (!inputFile) {
 // 2) Set up your WebSocket URL (point to your local proxy)
 const WS_URL = 'ws://localhost:8550';
 
-// 3) Create the WebSocket connection
-const ws = new WebSocket(WS_URL);
+// State management
+let ws = null;
+let waitingForEnter = false;
+let currentFfmpeg = null;
+let isReconnecting = false;
 
-// 4) On successful connection, run ffmpeg
-ws.on('open', () => {
-    console.log('Connected to the Transcribe proxy server.');
-
+// 4) Function to send audio file
+function sendAudioFile() {
+    console.log('\n=== Starting audio transmission ===');
+    
     /**
      * Spawn ffmpeg with the following arguments:
      * -i            Input file
@@ -39,7 +43,7 @@ ws.on('open', () => {
      * -f s16le      Output raw 16-bit little-endian PCM
      * pipe:1        Send all output to stdout
      */
-    const ffmpeg = spawn('ffmpeg', [
+    currentFfmpeg = spawn('ffmpeg', [
         '-i', inputFile,
         '-ac', '1',
         '-ar', '16000',
@@ -48,48 +52,103 @@ ws.on('open', () => {
         'pipe:1'
     ]);
 
-    // 5) Whenever ffmpeg outputs a chunk of audio, send it to the WebSocket
-    ffmpeg.stdout.on('data', (chunk) => {
+    // Whenever ffmpeg outputs a chunk of audio, send it to the WebSocket
+    currentFfmpeg.stdout.on('data', (chunk) => {
         console.log(`[${new Date().toISOString()}] sending chunk of size: ${chunk.length}`);
         ws.send(chunk);
     });
 
-    // 6) If ffmpeg has an error, print it to stderr
-    ffmpeg.stderr.on('data', (data) => {
-        console.error('ffmpeg error:', data.toString());
+    // If ffmpeg has an error, print it to stderr
+    currentFfmpeg.stderr.on('data', (data) => {
+        // Suppress ffmpeg info messages, only show actual errors
+        const msg = data.toString();
+        if (!msg.includes('Stream mapping:') && !msg.includes('Press [q]') && !msg.includes('size=') && !msg.includes('time=')) {
+            console.error('ffmpeg error:', msg);
+        }
     });
 
-    // 7) When ffmpeg is done, send END_OF_AUDIO signal to trigger finalization
-    ffmpeg.on('close', (code) => {
-        console.log(`ffmpeg process exited with code ${code}`);
+    // When ffmpeg is done, send END_OF_AUDIO signal to trigger finalization
+    currentFfmpeg.on('close', (code) => {
+        console.log(`[${new Date().toISOString()}] ffmpeg process exited with code ${code}`);
         console.log(`[${new Date().toISOString()}] All audio data sent. Sending END_OF_AUDIO signal...`);
         
         // Send END_OF_AUDIO text message to trigger Deepgram finalization
         ws.send('END_OF_AUDIO');
-        console.log(`[${new Date().toISOString()}] END_OF_AUDIO sent. Waiting for final transcripts...`);
+        console.log(`[${new Date().toISOString()}] END_OF_AUDIO sent. Waiting for final transcript...`);
         
-        // Note: Server will close the WebSocket after final transcript is received
+        currentFfmpeg = null;
     });
-});
+}
 
-// 8) Handle messages from the server (transcribed text)
-ws.on('message', (data) => {
-    try {
-        // Expect JSON of the form { transcript, isPartial }
-        const { transcript, isPartial } = JSON.parse(data);
-        if (transcript) {
-            console.log(`[${new Date().toISOString()}] ${transcript} (partial: ${isPartial})`);
+// 5) Function to set up WebSocket handlers
+function setupWebSocketHandlers() {
+    ws.on('open', () => {
+        console.log('Connected to the Transcribe proxy server.');
+        isReconnecting = false;
+        if (waitingForEnter) {
+            // If we were waiting for Enter and just reconnected, send audio
+            waitingForEnter = false;
+            sendAudioFile();
+        } else {
+            // Initial connection
+            sendAudioFile();
         }
-    } catch (err) {
-        console.error('Error parsing server message:', err);
+    });
+
+    ws.on('message', (data) => {
+        try {
+            const { transcript, isPartial } = JSON.parse(data);
+            if (transcript) {
+                console.log(`[${new Date().toISOString()}] ${transcript} (partial: ${isPartial})`);
+            }
+            
+            // When we receive final transcript, wait for Enter key
+            if (!isPartial && !waitingForEnter) {
+                waitingForEnter = true;
+                console.log('\n✓ Final transcript received!');
+                console.log('>>> Press ENTER to resend audio, or Ctrl+C to exit <<<\n');
+            }
+        } catch (err) {
+            console.error('Error parsing server message:', err);
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('WebSocket closed by server');
+        // Don't exit, stay ready for reconnection
+    });
+
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err);
+        // Don't exit, let user decide
+    });
+}
+
+// 6) Set up stdin listener for Enter key
+readline.emitKeypressEvents(process.stdin);
+if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+}
+
+process.stdin.on('keypress', (str, key) => {
+    if (key.name === 'return' && waitingForEnter) {
+        // Check if WebSocket is open
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            waitingForEnter = false;
+            sendAudioFile();
+        } else {
+            // Need to reconnect
+            console.log('Reconnecting to server...');
+            isReconnecting = true;
+            ws = new WebSocket(WS_URL);
+            setupWebSocketHandlers();
+        }
+    } else if (key.ctrl && key.name === 'c') {
+        console.log('\nExiting...');
+        process.exit(0);
     }
 });
 
-// 9) Handle WebSocket close/error
-ws.on('close', () => {
-    console.log('WebSocket closed');
-});
-
-ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
-});
+// 7) Create initial WebSocket connection
+ws = new WebSocket(WS_URL);
+setupWebSocketHandlers();
