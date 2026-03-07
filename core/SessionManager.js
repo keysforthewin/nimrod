@@ -345,137 +345,66 @@ class SessionManager {
    * @private
    */
   _handleTranscript(data) {
-    const receiveTimestamp = Date.now();
-    
-    // DEBUG: Log raw Deepgram response
-    logger.info(this.clientId, this.sessionId, 'SessionManager',
-      '📝 Raw Deepgram response received', {
-      rawData: JSON.stringify(data),
-      receiveTime: new Date(receiveTimestamp).toISOString(),
-    });
-    
     const alternatives = data.channel && data.channel.alternatives;
     const alternative = alternatives && alternatives[0];
     const transcript = alternative && alternative.transcript;
-    const confidence = alternative && alternative.confidence;
     const isFinal = data.is_final;
     const isSpeechFinal = data.from_finalize || data.speech_final;
-    
-    // Enhanced transcript parsing logs
+
     logger.info(this.clientId, this.sessionId, 'SessionManager',
-      '📝 Parsed Deepgram transcript', {
-      transcript: transcript || '(empty)',
-      transcriptLength: transcript ? transcript.length : 0,
-      isFinal,
-      isSpeechFinal,
-      confidence,
-      hasContent: !!(transcript && transcript.length > 0),
+      'Deepgram message', {
+      transcript: transcript || '',
+      is_final: isFinal,
+      speech_final: data.speech_final,
+      from_finalize: data.from_finalize,
     });
-    
+
     // Accumulate completed transcripts
     if (isFinal && transcript && transcript.length > 0) {
-      const previousCompleted = this.completedTranscript;
       this.completedTranscript += (this.completedTranscript ? ' ' : '') + transcript;
-      logger.info(this.clientId, this.sessionId, 'SessionManager',
-        '✓ Accumulated completed transcript', {
-        previousCompleted,
-        newSegment: transcript,
-        completedTranscript: this.completedTranscript,
-        totalLength: this.completedTranscript.length,
-      });
     }
-    
+
     // Prepare combined transcript for client
     const combinedTranscript = !isFinal && transcript
       ? (this.completedTranscript ? this.completedTranscript + ' ' + transcript : transcript)
       : this.completedTranscript;
-    
+
     // Send to client if there's content
     if (combinedTranscript || transcript || isSpeechFinal) {
       const message = {
         isPartial: !isSpeechFinal,
         transcript: combinedTranscript || transcript || '',
       };
-      
-      // Increment message sequence for tracking
-      this.messageSequence++;
-      const currentSeq = this.messageSequence;
-      
-      // Verify WebSocket state before sending
+
       const wsReadyState = this.ws.readyState;
-      const wsStateNames = {0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED'};
-      const wsStateName = wsStateNames[wsReadyState] || 'UNKNOWN';
-      
-      logger.info(this.clientId, this.sessionId, 'SessionManager',
-        `🔍 Pre-send WebSocket check [seq:${currentSeq}]`, {
-        readyState: wsReadyState,
-        stateName: wsStateName,
-        isOpen: wsReadyState === 1,
-        messageToSend: message,
-      });
-      
       if (wsReadyState !== 1) {
+        const wsStateNames = {0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED'};
         logger.error(this.clientId, this.sessionId, 'SessionManager',
-          `❌ WebSocket not OPEN [seq:${currentSeq}] - cannot send transcript`, null, {
+          'WebSocket not OPEN - cannot send transcript', null, {
           readyState: wsReadyState,
-          stateName: wsStateName,
+          stateName: wsStateNames[wsReadyState] || 'UNKNOWN',
           droppedMessage: message,
         });
         return;
       }
-      
+
       try {
-        const sendStartTime = Date.now();
-        const messageJson = JSON.stringify(message);
-        
-        this.ws.send(messageJson);
-        
-        const sendEndTime = Date.now();
-        const sendDuration = sendEndTime - sendStartTime;
-        const totalLatency = sendEndTime - receiveTimestamp;
-        
-        // Comprehensive send success logging
+        this.ws.send(JSON.stringify(message));
+
         logger.info(this.clientId, this.sessionId, 'SessionManager',
-          `✅ Transcript sent to client [seq:${currentSeq}]`, {
-          sequence: currentSeq,
-          isPartial: message.isPartial,
-          transcriptPreview: message.transcript.substring(0, 100) + (message.transcript.length > 100 ? '...' : ''),
-          transcriptLength: message.transcript.length,
-          fullTranscript: message.transcript,
-          messageSize: messageJson.length,
-          sendDurationMs: sendDuration,
-          totalLatencyMs: totalLatency,
-          timestamp: new Date(sendEndTime).toISOString(),
+          'Sent to client', {
+          transcript: message.transcript,
+          isFinal: !message.isPartial,
         });
-        
+
       } catch (err) {
-        // Enhanced error handling
         logger.error(this.clientId, this.sessionId, 'SessionManager',
-          `❌ Error sending transcript to client [seq:${currentSeq}]`, err, {
-          sequence: currentSeq,
-          errorMessage: err.message,
-          errorStack: err.stack,
-          wsReadyState: this.ws.readyState,
-          wsStateName: wsStateNames[this.ws.readyState] || 'UNKNOWN',
-          failedMessage: message,
-          failedMessageSize: JSON.stringify(message).length,
-        });
+          'Error sending transcript to client', err);
       }
-    } else {
-      logger.info(this.clientId, this.sessionId, 'SessionManager',
-        '⚠️ No content to send to client', {
-        combinedTranscript: combinedTranscript || '(empty)',
-        transcript: transcript || '(empty)',
-        reason: 'Both combinedTranscript and transcript are empty',
-      });
     }
-    
+
     // Handle speech_final
     if (isSpeechFinal) {
-      logger.info(this.clientId, this.sessionId, 'SessionManager',
-        '✓ Received speech_final from Deepgram');
-      
-      // If in ENDING state, finalize
       if (this.state === SessionState.ENDING) {
         this._handleFinalization();
       }
