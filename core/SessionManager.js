@@ -389,13 +389,9 @@ class SessionManager {
       }
 
       try {
-        this.ws.send(JSON.stringify(message));
-
-        logger.info(this.clientId, this.sessionId, 'SessionManager',
-          'Sent to client', {
-          transcript: message.transcript,
-          isFinal: !message.isPartial,
-        });
+        const json = JSON.stringify(message);
+        this.ws.send(json);
+        console.log(json);
 
       } catch (err) {
         logger.error(this.clientId, this.sessionId, 'SessionManager',

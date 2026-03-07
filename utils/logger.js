@@ -28,25 +28,17 @@ function formatLog(clientId, sessionId, module, level, message, metadata = null)
 /**
  * Log a debug message (verbose, for development)
  */
-function debug(clientId, sessionId, module, message, metadata = null) {
-  if (process.env.LOG_LEVEL === 'DEBUG' || process.env.NODE_ENV === 'development') {
-    console.log(formatLog(clientId, sessionId, module, 'DEBUG', message, metadata));
-  }
-}
+function debug() {}
 
 /**
  * Log an info message (normal operation)
  */
-function info(clientId, sessionId, module, message, metadata = null) {
-  console.log(formatLog(clientId, sessionId, module, 'INFO', message, metadata));
-}
+function info() {}
 
 /**
  * Log a warning message (unexpected but handled)
  */
-function warn(clientId, sessionId, module, message, metadata = null) {
-  console.warn(formatLog(clientId, sessionId, module, 'WARN', message, metadata));
-}
+function warn() {}
 
 /**
  * Log an error message (errors and exceptions)
@@ -62,29 +54,17 @@ function error(clientId, sessionId, module, message, err = null, metadata = null
 /**
  * Log a state transition (special case for state machines)
  */
-function stateTransition(clientId, sessionId, module, fromState, toState, reason = null) {
-  const metadata = { from: fromState, to: toState };
-  if (reason) {
-    metadata.reason = reason;
-  }
-  info(clientId, sessionId, module, `State transition: ${fromState} → ${toState}`, metadata);
-}
+function stateTransition() {}
 
 /**
  * Log performance timing
  */
-function timing(clientId, sessionId, module, operation, durationMs, metadata = null) {
-  const meta = { operation, durationMs, ...(metadata || {}) };
-  info(clientId, sessionId, module, `⏱️ ${operation} took ${durationMs.toFixed(2)}ms`, meta);
-}
+function timing() {}
 
 /**
  * Log metric/counter
  */
-function metric(clientId, sessionId, module, metricName, value, metadata = null) {
-  const meta = { metric: metricName, value, ...(metadata || {}) };
-  info(clientId, sessionId, module, `📊 ${metricName}: ${value}`, meta);
-}
+function metric() {}
 
 module.exports = {
   formatLog,
