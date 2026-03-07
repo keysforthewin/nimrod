@@ -370,7 +370,7 @@ class SessionManager {
       : this.completedTranscript;
 
     // Send to client if there's content
-    if (combinedTranscript || transcript || isSpeechFinal) {
+    if (combinedTranscript || transcript) {
       const message = {
         isPartial: !isSpeechFinal,
         transcript: combinedTranscript || transcript || '',
@@ -391,7 +391,7 @@ class SessionManager {
       try {
         const json = JSON.stringify(message);
         this.ws.send(json);
-        console.log(json);
+        console.log(`[conn:${this.clientId}] ${json}`);
 
       } catch (err) {
         logger.error(this.clientId, this.sessionId, 'SessionManager',

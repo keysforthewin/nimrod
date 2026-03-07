@@ -33,7 +33,9 @@ function debug() {}
 /**
  * Log an info message (normal operation)
  */
-function info() {}
+function info(clientId, sessionId, module, message, metadata = null) {
+  console.log(formatLog(clientId, sessionId, module, 'INFO', message, metadata));
+}
 
 /**
  * Log a warning message (unexpected but handled)

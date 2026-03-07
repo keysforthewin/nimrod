@@ -19,7 +19,8 @@ class ClientGateway {
     this.config = config;
     this.server = null;
     this.sessions = new Map(); // clientId -> SessionManager
-    
+    this.nextConnectionId = 1;
+
     logger.info(null, null, 'ClientGateway', `Initializing on port ${port}`);
   }
   
@@ -45,7 +46,7 @@ class ClientGateway {
    * @private
    */
   _handleConnection(ws) {
-    const clientId = generateSessionId();
+    const clientId = this.nextConnectionId++;
     const sessionId = generateSessionId();
     
     logger.info(clientId, sessionId, 'ClientGateway', '🔌 New client connected', {
