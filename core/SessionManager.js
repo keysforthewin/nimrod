@@ -391,7 +391,7 @@ class SessionManager {
       : this.completedTranscript;
     
     // Send to client if there's content
-    if (combinedTranscript || transcript) {
+    if (combinedTranscript || transcript || isSpeechFinal) {
       const message = {
         isPartial: !isSpeechFinal,
         transcript: combinedTranscript || transcript || '',
