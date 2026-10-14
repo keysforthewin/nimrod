@@ -243,7 +243,7 @@ npm run start:old
 ### Preserved (Unchanged)
 - `nimrod.js` - Original implementation (for reference/fallback)
 - `.env` - User configuration
-- `test.js`, `test_audio_logging.js` - Existing test files
+- `test.js` - ffmpeg-based test client
 
 ## Success Metrics
 

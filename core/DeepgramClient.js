@@ -201,6 +201,14 @@ class DeepgramClient {
       }, 10000); // 10 second timeout
       
       const checkReady = () => {
+        // close() may have nulled the connection while we were polling
+        // (e.g. the client disconnected mid-connect); stop polling rather than crash
+        if (!this.connection) {
+          clearTimeout(timeout);
+          reject(new Error('Connection closed before opening'));
+          return;
+        }
+        
         const readyState = this.connection.getReadyState();
         
         if (readyState === 1) { // OPEN

@@ -2,8 +2,6 @@
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
-const fs = require('fs');
-const path = require('path');
 
 const region = process.env.AWS_REGION;
 const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
@@ -11,13 +9,6 @@ const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 
 const chunkDurationMs = parseInt(process.env.CHUNK_DURATION_MS, 10) || 20;
 const audioSampleRate = parseInt(process.env.SAMPLE_RATE, 10) || 16000;
-
-// Ensure audio logs directory exists
-const audioLogsDir = './audio_logs';
-if (!fs.existsSync(audioLogsDir)) {
-    fs.mkdirSync(audioLogsDir, { recursive: true });
-    console.log('Created audio_logs directory');
-}
 
 const sockserver = new WebSocketServer({ port: 8550 }, () => {
     console.log('WebSocket server is listening on port 8550');
@@ -27,68 +18,6 @@ const sockserver = new WebSocketServer({ port: 8550 }, () => {
 function formatLog(clientId, sessionId, message) {
     const timestamp = new Date().toISOString();
     return `[${timestamp}][client:${clientId}][session:${sessionId}] ${message}`;
-}
-
-// WAV file writer class
-class WavWriter {
-    constructor(filename, sampleRate) {
-        this.filename = filename;
-        this.sampleRate = sampleRate;
-        this.bytesWritten = 0;
-        this.stream = fs.createWriteStream(filename);
-        
-        // Write WAV header (will update later with correct size)
-        this.writeHeader();
-    }
-
-    writeHeader() {
-        const header = Buffer.alloc(44);
-        
-        // RIFF chunk descriptor
-        header.write('RIFF', 0);
-        header.writeUInt32LE(0, 4); // File size - 8 (will be updated)
-        header.write('WAVE', 8);
-        
-        // fmt sub-chunk
-        header.write('fmt ', 12);
-        header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
-        header.writeUInt16LE(1, 20); // AudioFormat (1 = PCM)
-        header.writeUInt16LE(1, 22); // NumChannels (1 = mono)
-        header.writeUInt32LE(this.sampleRate, 24); // SampleRate
-        header.writeUInt32LE(this.sampleRate * 2, 28); // ByteRate
-        header.writeUInt16LE(2, 32); // BlockAlign
-        header.writeUInt16LE(16, 34); // BitsPerSample
-        
-        // data sub-chunk
-        header.write('data', 36);
-        header.writeUInt32LE(0, 40); // Subchunk2Size (will be updated)
-        
-        this.stream.write(header);
-    }
-
-    writeAudioChunk(chunk) {
-        this.stream.write(chunk);
-        this.bytesWritten += chunk.length;
-    }
-
-    close() {
-        // Update the header with the correct sizes
-        const fileSize = this.bytesWritten + 44 - 8;
-        const dataSize = this.bytesWritten;
-        
-        const sizeBuffer = Buffer.alloc(4);
-        
-        // Update file size
-        sizeBuffer.writeUInt32LE(fileSize, 0);
-        fs.writeSync(fs.openSync(this.filename, 'r+'), sizeBuffer, 0, 4, 4);
-        
-        // Update data size
-        sizeBuffer.writeUInt32LE(dataSize, 0);
-        fs.writeSync(fs.openSync(this.filename, 'r+'), sizeBuffer, 0, 4, 40);
-        
-        this.stream.end();
-        console.log(`WAV file saved: ${this.filename} (${this.bytesWritten} bytes of audio data)`);
-    }
 }
 
 class AudioStream {
@@ -106,12 +35,6 @@ class AudioStream {
         this.silenceStartTime = 0;
         this.isClosed = false;
         this.audioBufferQueue = [];
-        
-        // Initialize WAV writer for this session
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = path.join(audioLogsDir, `audio_session_${timestamp}_${sessionId}.wav`);
-        this.wavWriter = new WavWriter(filename, audioSampleRate);
-        console.log(formatLog(clientId, sessionId, `Created audio log file: ${filename}`));
     }
 
 
@@ -129,9 +52,6 @@ class AudioStream {
                                 if (this.consecutiveSilenceChunksSent < this.maxSilenceChunks) {
                                     // Send a chunk of silence
                                     const silenceChunk = this.silenceChunk;
-                                    
-                                    // Log the silence chunk to WAV file
-                                    this.wavWriter.writeAudioChunk(silenceChunk);
                                     
                                     yield {
                                         AudioEvent: {AudioChunk: silenceChunk},
@@ -158,9 +78,6 @@ class AudioStream {
                         const audioChunk = queueItem.data;
                         console.log(formatLog(this.clientId, this.sessionId, `Processing audio chunk: ${audioChunk.length} bytes, queue size: ${this.audioBufferQueue.length}`));
                         
-                        // Log the audio chunk to WAV file
-                        this.wavWriter.writeAudioChunk(audioChunk);
-                        
                         yield {
                             AudioEvent: {
                                 AudioChunk: audioChunk,
@@ -186,12 +103,6 @@ class AudioStream {
             }
         } finally {
             console.log(formatLog(this.clientId, this.sessionId, "Audio stream generator exited"));
-            
-            // Only close the WAV file if the client has disconnected
-            if (this.isClosed && this.wavWriter) {
-                console.log(formatLog(this.clientId, this.sessionId, "Client disconnected, closing WAV file"));
-                this.wavWriter.close();
-            }
         }
     }
 }
@@ -704,11 +615,6 @@ sockserver.on('connection', async (ws) => {
         currentSessionId = generateSessionId();
         console.log(formatLog(clientId, currentSessionId, "Initializing new session"));
         
-        // Close previous WAV file if it exists
-        if (audioStream && audioStream.wavWriter) {
-            audioStream.wavWriter.close();
-        }
-        
         // Create new AudioStream for this session
         audioStream = new AudioStream(chunkDurationMs, audioSampleRate, clientId, currentSessionId);
         
@@ -785,13 +691,9 @@ sockserver.on('connection', async (ws) => {
     ws.on('close', () => {
         console.log(formatLog(clientId, currentSessionId, "Client disconnected"));
         
-        // Close AudioStream and WAV file
+        // Close AudioStream
         if (audioStream) {
             audioStream.isClosed = true;
-            if (audioStream.wavWriter) {
-                console.log(formatLog(clientId, currentSessionId, "Closing WAV file on client disconnect"));
-                audioStream.wavWriter.close();
-            }
         }
         
         // Clean up intervals and timeouts when client disconnects
@@ -829,13 +731,9 @@ sockserver.on('connection', async (ws) => {
     ws.on('error', (err) => {
         console.error(formatLog(clientId, currentSessionId, `WebSocket error: ${err.message}`));
         
-        // Close AudioStream and WAV file
+        // Close AudioStream
         if (audioStream) {
             audioStream.isClosed = true;
-            if (audioStream.wavWriter) {
-                console.log(formatLog(clientId, currentSessionId, "Closing WAV file on WebSocket error"));
-                audioStream.wavWriter.close();
-            }
         }
         
         // Clean up intervals and timeouts on WebSocket error

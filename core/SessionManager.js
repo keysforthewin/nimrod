@@ -14,12 +14,23 @@ class SessionManager {
    * @param {string} sessionId - Session identifier
    * @param {WebSocket} ws - Client WebSocket connection
    * @param {object} config - Application configuration
+   * @param {object} [authInfo] - Result of authentication ({ subject, ip, expSec })
    */
-  constructor(clientId, sessionId, ws, config) {
+  constructor(clientId, sessionId, ws, config, authInfo = {}) {
     this.clientId = clientId;
     this.sessionId = sessionId;
     this.ws = ws;
     this.config = config;
+
+    // Identity (from auth) and gateway bookkeeping
+    this.subject = authInfo.subject || null;
+    this.ip = authInfo.ip || null;
+    this.deadlineTimer = null;
+    this.released = false;
+
+    // Usage accounting
+    this.audioBytesReceived = 0;
+    this.audioLimitHit = false;
     
     // State
     this.state = SessionState.IDLE;
@@ -42,6 +53,7 @@ class SessionManager {
     logger.info(clientId, sessionId, 'SessionManager', 'Session created', {
       bufferMaxChunks: config.session.bufferMaxChunks,
       finalizeTimeoutMs: config.session.finalizeTimeoutMs,
+      subject: this.subject,
     });
     
     // Set up Deepgram event handlers
@@ -69,6 +81,27 @@ class SessionManager {
     if (this.eoaReceived) {
       logger.warn(this.clientId, this.sessionId, 'SessionManager', 
         'Ignoring audio chunk - EOA already received');
+      return;
+    }
+
+    if (this.audioLimitHit) {
+      return;
+    }
+
+    // Enforce per-connection audio cap (MAX_AUDIO_SEC_PER_CONNECTION)
+    this.audioBytesReceived += chunk.length;
+    const maxAudioSec = this.config.limits && this.config.limits.maxAudioSecPerConnection;
+    if (maxAudioSec > 0 && this.getAudioSecReceived() > maxAudioSec) {
+      this.audioLimitHit = true;
+      logger.info(this.clientId, this.sessionId, 'SessionManager',
+        `⏱ Audio limit exceeded (${maxAudioSec}s), closing connection`);
+      try {
+        // 1008 = policy violation; gateway's close handler performs cleanup
+        this.ws.close(1008, 'audio limit exceeded');
+      } catch (err) {
+        logger.error(this.clientId, this.sessionId, 'SessionManager',
+          'Error closing connection after audio limit', err);
+      }
       return;
     }
     
@@ -441,6 +474,16 @@ class SessionManager {
   }
   
   /**
+   * Seconds of audio received on this connection, derived from PCM byte count
+   * @returns {number}
+   */
+  getAudioSecReceived() {
+    const { sampleRate, channels } = this.config.deepgram;
+    const bytesPerSec = (sampleRate || 16000) * (channels || 1) * 2; // 16-bit samples
+    return this.audioBytesReceived / bytesPerSec;
+  }
+
+  /**
    * Get current state
    * @returns {string} SessionState
    */
@@ -461,6 +504,8 @@ class SessionManager {
       sendLoopRunning: this.sendLoopRunning,
       eoaReceived: this.eoaReceived,
       completedTranscriptLength: this.completedTranscript.length,
+      audioSecReceived: Math.round(this.getAudioSecReceived() * 100) / 100,
+      subject: this.subject,
     };
   }
 }

@@ -6,7 +6,11 @@
  *   2) npm install ws
  *
  * Usage:
- *   node ffmpeg-client.js path/to/audio.wav
+ *   node test.js path/to/audio.wav
+ *
+ * Environment:
+ *   NIMROD_URL    WebSocket URL of the server (default ws://localhost:8550)
+ *   NIMROD_TOKEN  Credential to send as ?token=... when the server has AUTH_MODE set
  */
 
 const { spawn } = require('child_process');
@@ -22,7 +26,13 @@ if (!inputFile) {
 }
 
 // 2) Set up your WebSocket URL (point to your local proxy)
-const WS_URL = 'ws://localhost:8550';
+const WS_URL = (() => {
+    const url = new URL(process.env.NIMROD_URL || 'ws://localhost:8550');
+    if (process.env.NIMROD_TOKEN) {
+        url.searchParams.set('token', process.env.NIMROD_TOKEN);
+    }
+    return url.toString();
+})();
 
 // State management
 let ws = null;
@@ -113,13 +123,14 @@ function setupWebSocketHandlers() {
         }
     });
 
-    ws.on('close', () => {
-        console.log('WebSocket closed by server');
+    ws.on('close', (code, reason) => {
+        const detail = reason && reason.length ? `: ${reason}` : '';
+        console.log(`WebSocket closed by server (code ${code}${detail})`);
         // Don't exit, stay ready for reconnection
     });
 
     ws.on('error', (err) => {
-        console.error('WebSocket error:', err);
+        console.error('WebSocket error:', err.message || err);
         // Don't exit, let user decide
     });
 }

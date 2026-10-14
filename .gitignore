@@ -137,5 +137,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-# Audio logs directory
+
+# Audio logs directory (legacy; never commit recordings)
 audio_logs/

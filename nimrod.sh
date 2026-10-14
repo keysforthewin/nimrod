@@ -6,5 +6,5 @@ export NVM_DIR="$HOME/.nvm"
 
 nvm use 22
 export NODE_ENV=production
-cd /home/mulligan/nimrod
+cd "$(dirname "$0")"
 npm run start

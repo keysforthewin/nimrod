@@ -6,8 +6,11 @@ const logger = require('./utils/logger');
 
 // Validate configuration
 try {
-  config.validate();
+  const warnings = config.validate();
   logger.info(null, null, 'main', '✓ Configuration validated');
+  for (const warning of warnings) {
+    logger.info(null, null, 'main', `⚠ ${warning}`);
+  }
 } catch (err) {
   logger.error(null, null, 'main', 'Configuration validation failed', err);
   process.exit(1);
@@ -20,6 +23,8 @@ gateway.start();
 
 logger.info(null, null, 'main', '🚀 Nimrod server started', {
   port: config.server.port,
+  authMode: config.auth.mode,
+  limits: config.limits,
   deepgramModel: config.deepgram.model,
   language: config.deepgram.language,
   sampleRate: config.deepgram.sampleRate,

@@ -5,11 +5,12 @@
   "scripts": {
     "start": "node index.js",
     "start:old": "node nimrod.js",
-    "test": "node test.js"
+    "test": "node test.js",
+    "test:unit": "node --test test/*.test.js"
   },
   "author": "",
-  "license": "ISC",
-  "description": "",
+  "license": "MIT",
+  "description": "WebSocket proxy for Deepgram real-time transcription. Keeps your API key server-side.",
   "dependencies": {
     "@aws-sdk/client-translate": "^3.775.0",
     "@deepgram/sdk": "^4.11.2",
